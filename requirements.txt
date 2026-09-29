@@ -1,0 +1,11 @@
+tensorflow>=2.15.0
+keras
+numpy
+pandas
+opencv-python-headless
+pillow
+scikit-learn
+matplotlib
+seaborn
+kaggle
+gradio
