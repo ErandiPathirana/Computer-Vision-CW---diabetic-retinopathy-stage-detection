@@ -67,4 +67,3 @@ flowchart TD
    - Open `notebooks/DR_Stage_Detection.ipynb` in Colab.
    - Update the `!git clone` URL in the first code cell to point to your repository.
    - Run the cells sequentially from top to bottom.
-5. **Launch the App**: Run the final cell or execute `python app/app.py` in the terminal to get a public `gradio.live` link to interact with the model.
