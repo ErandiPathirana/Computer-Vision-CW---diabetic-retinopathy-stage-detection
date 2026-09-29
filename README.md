@@ -55,15 +55,3 @@ flowchart TD
   - `evaluate.py`: QWK, Classification Report, ROC/AUC, and error analysis.
   - `gradcam.py`: Visual explainability module.
 
-## 5. How to Run in Google Colab (Step-by-Step)
-
-1. **Upload to GitHub**: Push this entire repository to your GitHub account.
-2. **Open Colab**: Navigate to [Google Colab](https://colab.research.google.com/) and connect a **T4 GPU** runtime.
-3. **Kaggle API Setup**: 
-   - Get your `kaggle.json` credentials from Kaggle.
-   - Click the "Secrets" (key icon) on the left sidebar in Colab.
-   - Add two secrets: `KAGGLE_USERNAME` and `KAGGLE_KEY`.
-4. **Run the Notebook**:
-   - Open `notebooks/DR_Stage_Detection.ipynb` in Colab.
-   - Update the `!git clone` URL in the first code cell to point to your repository.
-   - Run the cells sequentially from top to bottom.
