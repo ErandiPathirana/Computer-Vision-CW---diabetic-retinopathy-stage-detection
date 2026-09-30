@@ -47,11 +47,30 @@ def data_augmentation_layer():
     ], name="augmentation_pipeline")
 
 def parse_image(file_path, label):
-    """Reads and decodes a preprocessed image."""
+    """
+    Reads and decodes a preprocessed image.
+
+    EfficientNetB0 includes its own internal Rescaling layer and expects
+    inputs in the range [0, 255] as float32. Do NOT divide by 255 here —
+    preprocess_image() in src/preprocess.py already returns uint8 in that range.
+    The tf.debugging assertion below will raise an error during graph execution
+    if the pixel range falls into [0, 1], catching any accidental double-normalisation.
+    """
     img = tf.io.read_file(file_path)
     img = tf.io.decode_png(img, channels=3)
     img = tf.image.resize(img, IMG_SIZE)
-    img = tf.cast(img, tf.float32) # Keep in 0-255 range for EfficientNet
+    img = tf.cast(img, tf.float32)  # Keep in 0-255 range for EfficientNet
+
+    # Guard: if max pixel value is <= 1 the image was accidentally normalised.
+    # This runs only when tf.debugging is enabled (default in eager mode).
+    tf.debugging.assert_greater(
+        tf.reduce_max(img),
+        tf.constant(1.0, dtype=tf.float32),
+        message=(
+            "parse_image: pixel max <= 1.0 — input appears to be normalised to [0,1]. "
+            "EfficientNetB0 expects [0,255]. Remove any /255 rescaling upstream."
+        ),
+    )
     return img, label
 
 def build_dataset(df, is_training=False):

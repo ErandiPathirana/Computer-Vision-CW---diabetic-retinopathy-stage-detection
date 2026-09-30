@@ -72,31 +72,42 @@ def configure_phase_1(model):
 
 def configure_phase_2(model, unfreeze_layers=30):
     """
-    Configures Phase 2: Unfreezes the top N layers of the backbone for fine-tuning.
-    Crucially keeps BatchNormalization layers frozen to prevent destroying learned statistics.
-    Learning rate = 1e-5.
+    Configures Phase 2: Unfreezes the top N non-BN layers of the backbone for fine-tuning.
+
+    BatchNorm freezing rationale
+    ----------------------------
+    Only the *backbone's* BatchNormalization layers are kept frozen here.
+    Frozen backbone BN layers use their ImageNet-trained running statistics
+    (mean/variance) as fixed constants, which is critical when fine-tuning
+    on a small medical dataset — updating them would corrupt the statistics
+    that the backbone's weights depend on.
+
+    The head's `head_bn` layer IS intentionally left trainable (set above)
+    because it was freshly initialised and must adapt to the new feature
+    distribution. This is correct and not a contradiction of the BN-freeze rule.
+
+    Learning rate = 1e-5 (10x smaller than Phase 1 to avoid catastrophic forgetting).
     """
-    # Keep head layers trainable
+    # Keep head layers trainable (including head_bn — see docstring)
     head_layer_names = ["head_gap", "head_bn", "head_dropout", "head_classifier"]
     for layer in model.layers:
         if layer.name in head_layer_names:
             layer.trainable = True
 
-    # Unfreeze the top N layers of the base_model
-    # We iterate backwards through the base model's layers
+    # Unfreeze the top N layers of the backbone, skipping BatchNorm layers
     unfrozen_count = 0
     for layer in reversed(model.base_model.layers):
         if unfrozen_count >= unfreeze_layers:
             layer.trainable = False
             continue
-            
-        # NEVER unfreeze BatchNormalization layers during fine-tuning
+
+        # Keep backbone BatchNorm layers frozen to preserve ImageNet statistics
         if isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
         else:
             layer.trainable = True
             unfrozen_count += 1
-            
+
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5)
     model.compile(
         optimizer=optimizer,

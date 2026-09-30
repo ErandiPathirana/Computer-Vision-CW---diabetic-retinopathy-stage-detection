@@ -3,18 +3,19 @@ Training module for Diabetic Retinopathy stage detection.
 Handles the 2-phase training process, callbacks, history plotting, and hyperparameter experiments.
 """
 import os
+import shutil
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.callbacks import (
-    EarlyStopping, 
-    ReduceLROnPlateau, 
-    ModelCheckpoint, 
-    CSVLogger, 
-    TensorBoard
+    EarlyStopping,
+    ReduceLROnPlateau,
+    ModelCheckpoint,
+    CSVLogger,
+    TensorBoard,
 )
 
-from src.config import RESULTS_DIR, MODELS_DIR, LOGS_DIR
+from src.config import RESULTS_DIR, MODELS_DIR, LOGS_DIR, BEST_MODEL_PATH
 from src.model import build_model, configure_phase_1, configure_phase_2
 from src.augment import build_dataset
 from src.data import compute_class_weights_from_train
@@ -163,7 +164,26 @@ def train_pipeline(epochs_phase1=15, epochs_phase2=20):
     # COMBINED PLOTTING
     # =========================================================================
     plot_history(history_p1, history_p2, save_prefix="combined_phases")
-    
+
+    # =========================================================================
+    # CANONICAL MODEL COPY
+    # Ensure results/best_model.keras always points to the best fine-tuned
+    # weights so that evaluate.py and app.py have a single reliable path.
+    # =========================================================================
+    finetuned_ckpt = os.path.join(MODELS_DIR, "best_model_finetuned.keras")
+    if os.path.exists(finetuned_ckpt):
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        shutil.copy2(finetuned_ckpt, BEST_MODEL_PATH)
+        print(f"\nCanonical best model copied to {BEST_MODEL_PATH}")
+    else:
+        # Phase 2 didn't produce a checkpoint (e.g. val loss never improved);
+        # fall back to Phase 1 checkpoint.
+        phase1_ckpt = os.path.join(MODELS_DIR, "best_model_phase1.keras")
+        if os.path.exists(phase1_ckpt):
+            shutil.copy2(phase1_ckpt, BEST_MODEL_PATH)
+            print(f"\nWarning: Phase 2 checkpoint not found. "
+                  f"Canonical best model copied from Phase 1 → {BEST_MODEL_PATH}")
+
     print("\nTraining complete! Best models saved to", MODELS_DIR)
 
 
