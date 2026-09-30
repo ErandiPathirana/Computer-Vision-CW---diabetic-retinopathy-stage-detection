@@ -1,284 +1,161 @@
 """
-Smoke tests for the Diabetic Retinopathy pipeline.
-
-Covers:
-  - Model build (build_model)
-  - preprocess_image on a synthetic 512x512 image
-  - Grad-CAM on the same synthetic image (shape + no-NaN check)
-
-Run with:
-    python -m pytest tests/test_smoke.py -v
-or:
-    python tests/test_smoke.py
+Smoke tests (run with:  python -m pytest tests -q   or   python -m unittest discover tests).
+Tests that need TensorFlow are skipped automatically when it is not installed.
 """
-import os
+import importlib.util
 import sys
 import tempfile
+import unittest
+from pathlib import Path
+
+import cv2
 import numpy as np
+import pandas as pd
 
-# Ensure the repo root is on sys.path so `from src.X import Y` works
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pytest
+from src import config as C            # noqa: E402
+from src import data as D              # noqa: E402
+from src import preprocess as P        # noqa: E402
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_synthetic_image_file(h: int = 512, w: int = 512) -> str:
-    """
-    Creates a temporary PNG file with a realistic synthetic retinal appearance:
-    - Dark circular background (simulates fundus vignette)
-    - Bright disc spot (simulates optic disc)
-    This is brighter than a pure-black image, so the fundus-crop step in
-    preprocess_image does not produce a zero-pixel crop.
-    """
-    import cv2
-
-    img = np.zeros((h, w, 3), dtype=np.uint8)
-    # Simulate the retinal fundus with a bright greenish circle
-    cv2.circle(img, (w // 2, h // 2), int(min(h, w) * 0.45), (50, 120, 50), thickness=-1)
-    # Optic disc
-    cv2.circle(img, (int(w * 0.6), h // 2), int(min(h, w) * 0.08), (200, 200, 150), thickness=-1)
-    # Some microaneurysm-like dots
-    for _ in range(30):
-        cx = np.random.randint(int(w * 0.2), int(w * 0.8))
-        cy = np.random.randint(int(h * 0.2), int(h * 0.8))
-        cv2.circle(img, (cx, cy), 3, (180, 80, 80), thickness=-1)
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    # cv2 writes BGR; convert RGB → BGR before saving
-    cv2.imwrite(tmp.name, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-    tmp.close()
-    return tmp.name
+HAS_TF = importlib.util.find_spec("tensorflow") is not None
 
 
-# ---------------------------------------------------------------------------
-# Test 1: preprocess_image
-# ---------------------------------------------------------------------------
-
-class TestPreprocessImage:
-    def setup_method(self):
-        self.img_path = _make_synthetic_image_file(512, 512)
-
-    def teardown_method(self):
-        if os.path.exists(self.img_path):
-            os.remove(self.img_path)
-
-    def test_output_shape(self):
-        from src.config import IMG_SIZE
-        from src.preprocess import preprocess_image
-
-        result = preprocess_image(self.img_path)
-
-        assert result.shape == (*IMG_SIZE, 3), (
-            f"Expected shape {(*IMG_SIZE, 3)}, got {result.shape}"
-        )
-
-    def test_output_dtype_uint8(self):
-        from src.preprocess import preprocess_image
-
-        result = preprocess_image(self.img_path)
-        assert result.dtype == np.uint8, (
-            f"Expected uint8 (0-255), got dtype={result.dtype}. "
-            "EfficientNetB0 requires 0-255 inputs — do not normalise here."
-        )
-
-    def test_output_range_0_255(self):
-        from src.preprocess import preprocess_image
-
-        result = preprocess_image(self.img_path)
-        assert result.min() >= 0 and result.max() <= 255, (
-            f"Pixel range [{result.min()}, {result.max()}] out of expected [0, 255]."
-        )
-
-    def test_return_steps_length(self):
-        from src.preprocess import preprocess_image
-
-        steps = preprocess_image(self.img_path, return_steps=True)
-        assert len(steps) == 6, f"Expected 6 pipeline steps, got {len(steps)}"
+def fake_fundus(h=480, w=640, seed=0):
+    """A synthetic 'fundus' image: black frame, orange disc, bright spot, light noise."""
+    rng = np.random.RandomState(seed)
+    img = np.zeros((h, w, 3), np.uint8)
+    cv2.circle(img, (w // 2, h // 2), min(h, w) // 2 - 10, (190, 110, 50), -1)
+    cv2.circle(img, (w // 2 + 60, h // 2 - 20), 25, (240, 200, 120), -1)
+    noise = rng.randint(0, 6, img.shape, dtype=np.uint8)
+    return np.where(img > 0, cv2.add(img, noise), img)
 
 
-# ---------------------------------------------------------------------------
-# Test 2: build_model
-# ---------------------------------------------------------------------------
+class TestConfig(unittest.TestCase):
+    def test_paths_are_relative_to_repo(self):
+        self.assertTrue(C.REPO_ROOT.exists())
+        self.assertEqual(C.BEST_MODEL_PATH.parent, C.RESULTS_DIR)
+        self.assertEqual(len(C.CLASS_NAMES), 5)
 
-class TestBuildModel:
-    def test_model_builds(self):
-        import tensorflow as tf
+    def test_split_ratios_sum_to_one(self):
+        self.assertAlmostEqual(sum(C.SPLIT_RATIOS), 1.0)
+
+
+class TestPreprocess(unittest.TestCase):
+    def test_output_shape_dtype_range(self):
+        out = P.preprocess_image(fake_fundus())
+        self.assertEqual(out.shape, (C.IMG_SIZE, C.IMG_SIZE, 3))
+        self.assertEqual(out.dtype, np.uint8)
+        self.assertGreater(out.max(), 1)          # must be 0-255, not 0-1 (no double normalisation)
+
+    def test_crop_removes_black_frame(self):
+        img = np.zeros((300, 300, 3), np.uint8)
+        img[100:200, 50:250] = 128
+        self.assertEqual(P.crop_black_borders(img).shape[:2], (100, 200))
+
+    def test_black_image_is_not_cropped_to_nothing(self):
+        self.assertEqual(P.crop_black_borders(np.zeros((50, 50, 3), np.uint8)).shape, (50, 50, 3))
+
+    def test_steps_returned(self):
+        steps = P.preprocess_image(fake_fundus(), return_steps=True)
+        self.assertEqual([n for n, _ in steps], ["Original", "Cropped", "Denoised", "CLAHE", "Sharpened"])
+
+    def test_deterministic(self):
+        img = fake_fundus()
+        np.testing.assert_array_equal(P.preprocess_image(img), P.preprocess_image(img))
+
+    def test_bytes_pipeline_matches_array_pipeline(self):
+        img = fake_fundus()
+        ok, buf = cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        np.testing.assert_array_equal(P.preprocess_bytes(buf.tobytes()), P.preprocess_image(img))
+
+    def test_unreadable_bytes_raise(self):
+        with self.assertRaises(ValueError):
+            P.preprocess_bytes(b"not an image")
+
+    def test_model_input_is_float_0_255(self):
+        x = P.to_model_input(P.preprocess_image(fake_fundus()))
+        self.assertEqual(x.dtype, np.float32)
+        self.assertEqual(x.shape, (1, C.IMG_SIZE, C.IMG_SIZE, 3))
+
+
+class TestData(unittest.TestCase):
+    def _fake_dataset(self, tmp: Path):
+        img_dir = tmp / "imgs"
+        img_dir.mkdir()
+        rows = []
+        for cls, n in enumerate([30, 10, 15, 8, 8]):
+            for i in range(n):
+                name = f"c{cls}_{i}"
+                cv2.imwrite(str(img_dir / f"{name}.png"), cv2.cvtColor(fake_fundus(120, 160, i), cv2.COLOR_RGB2BGR))
+                rows.append((name, cls))
+        return pd.DataFrame(rows, columns=["id_code", "diagnosis"]), img_dir
+
+    def test_validate_and_split_have_no_leakage(self):
+        with tempfile.TemporaryDirectory() as t:
+            df, img_dir = self._fake_dataset(Path(t))
+            clean = D.validate_dataset(df, img_dir)
+            tr, va, te = D.make_splits(clean, out_dir=Path(t) / "splits")
+            self.assertEqual(len(tr) + len(va) + len(te), len(clean))
+            self.assertFalse(set(tr.id_code) & set(te.id_code))
+            self.assertFalse(set(tr.id_code) & set(va.id_code))
+            self.assertEqual(set(tr.diagnosis), set(range(5)))    # stratified: every class in train
+
+    def test_csv_without_labels_gives_clear_error(self):
+        with self.assertRaises(ValueError):
+            D.validate_dataset(pd.DataFrame({"id_code": ["a", "b"]}))
+
+    def test_bad_label_range_rejected(self):
+        with self.assertRaises(ValueError):
+            D.validate_dataset(pd.DataFrame({"id_code": ["a"], "diagnosis": [9]}))
+
+
+@unittest.skipUnless(HAS_TF, "TensorFlow not installed")
+class TestModelAndGradCAM(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
         from src.model import build_model
-        from src.config import IMG_SIZE, NUM_CLASSES
+        cls.model = build_model("efficientnetb0", weights=None)     # no download needed for tests
 
-        model = build_model()
-        assert model is not None
+    def test_output_shape_and_softmax(self):
+        x = np.random.randint(0, 255, (2, C.IMG_SIZE, C.IMG_SIZE, 3)).astype("float32")
+        out = self.model.predict(x, verbose=0)
+        self.assertEqual(out.shape, (2, 5))
+        np.testing.assert_allclose(out.sum(1), 1.0, atol=1e-4)
 
-        # Input shape
-        expected_input = (None, *IMG_SIZE, 3)
-        assert tuple(model.input_shape) == expected_input, (
-            f"Input shape mismatch: {model.input_shape} vs {expected_input}"
-        )
+    def test_phase_freezing(self):
+        import keras
+        from src.model import configure_phase1, configure_phase2, get_base_model
+        configure_phase1(self.model)
+        self.assertFalse(get_base_model(self.model).trainable)
+        configure_phase2(self.model, unfreeze_layers=30)
+        base = get_base_model(self.model)
+        self.assertTrue(any(l.trainable for l in base.layers))
+        self.assertFalse(any(l.trainable for l in base.layers if isinstance(l, keras.layers.BatchNormalization)))
 
-        # Output shape (batch, NUM_CLASSES)
-        expected_output = (None, NUM_CLASSES)
-        assert tuple(model.output_shape) == expected_output, (
-            f"Output shape mismatch: {model.output_shape} vs {expected_output}"
-        )
+    def test_gradcam_shape_range_and_no_nan(self):
+        from src.gradcam import make_gradcam, overlay_heatmap
+        img = P.preprocess_image(fake_fundus())
+        heat, probs, cls = make_gradcam(self.model, img)
+        self.assertEqual(heat.shape, (C.IMG_SIZE, C.IMG_SIZE))
+        self.assertFalse(np.isnan(heat).any())
+        self.assertTrue(0.0 <= heat.min() and heat.max() <= 1.0)
+        self.assertEqual(len(probs), 5)
+        self.assertEqual(overlay_heatmap(img, heat).shape, img.shape)
 
-    def test_base_model_attribute(self):
-        from src.model import build_model
-        import tensorflow as tf
+    def test_save_and_reload_gives_same_prediction_and_gradcam_works(self):
+        import keras
+        from src.gradcam import make_gradcam
+        img = P.preprocess_image(fake_fundus())
+        x = P.to_model_input(img)
+        with tempfile.TemporaryDirectory() as t:
+            path = Path(t) / "m.keras"
+            self.model.save(path)
+            loaded = keras.models.load_model(path)
+        np.testing.assert_allclose(self.model.predict(x, verbose=0), loaded.predict(x, verbose=0), atol=1e-4)
+        heat, _, _ = make_gradcam(loaded, img)          # simulates the web app loading from disk
+        self.assertEqual(heat.shape, (C.IMG_SIZE, C.IMG_SIZE))
 
-        model = build_model()
-        assert hasattr(model, "base_model"), "build_model() must set model.base_model"
-        assert isinstance(model.base_model, tf.keras.Model)
-
-    def test_phase1_freezes_backbone(self):
-        from src.model import build_model, configure_phase_1
-        import tensorflow as tf
-
-        model = build_model()
-        model = configure_phase_1(model)
-
-        backbone_trainable = [
-            l.trainable for l in model.base_model.layers
-            if not isinstance(l, tf.keras.layers.InputLayer)
-        ]
-        assert all(not t for t in backbone_trainable), (
-            "Phase 1: all backbone layers should be frozen"
-        )
-
-    def test_phase2_bn_stays_frozen(self):
-        from src.model import build_model, configure_phase_1, configure_phase_2
-        import tensorflow as tf
-
-        model = build_model()
-        model = configure_phase_1(model)
-        model = configure_phase_2(model)
-
-        for layer in model.base_model.layers:
-            if isinstance(layer, tf.keras.layers.BatchNormalization):
-                assert not layer.trainable, (
-                    f"Backbone BN layer '{layer.name}' should stay frozen in Phase 2"
-                )
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Grad-CAM
-# ---------------------------------------------------------------------------
-
-class TestGradCAM:
-    def setup_method(self):
-        self.img_path = _make_synthetic_image_file(512, 512)
-        import tensorflow as tf
-        from src.model import build_model, configure_phase_1
-        self.model = build_model()
-        self.model = configure_phase_1(self.model)
-
-    def teardown_method(self):
-        if os.path.exists(self.img_path):
-            os.remove(self.img_path)
-
-    def test_heatmap_shape(self):
-        from src.preprocess import preprocess_image
-        from src.gradcam import make_gradcam_heatmap
-        from src.config import GRADCAM_LAYER
-
-        img = preprocess_image(self.img_path).astype(np.float32)
-        img_batch = np.expand_dims(img, axis=0)  # (1, 224, 224, 3)
-
-        heatmap = make_gradcam_heatmap(img_batch, self.model, GRADCAM_LAYER)
-
-        assert heatmap.ndim == 2, f"Heatmap should be 2-D, got shape {heatmap.shape}"
-        assert heatmap.shape[0] > 0 and heatmap.shape[1] > 0
-
-    def test_heatmap_no_nan(self):
-        from src.preprocess import preprocess_image
-        from src.gradcam import make_gradcam_heatmap
-        from src.config import GRADCAM_LAYER
-
-        img = preprocess_image(self.img_path).astype(np.float32)
-        img_batch = np.expand_dims(img, axis=0)
-
-        heatmap = make_gradcam_heatmap(img_batch, self.model, GRADCAM_LAYER)
-        assert not np.isnan(heatmap).any(), "Grad-CAM heatmap contains NaN values"
-
-    def test_heatmap_range(self):
-        from src.preprocess import preprocess_image
-        from src.gradcam import make_gradcam_heatmap
-        from src.config import GRADCAM_LAYER
-
-        img = preprocess_image(self.img_path).astype(np.float32)
-        img_batch = np.expand_dims(img, axis=0)
-
-        heatmap = make_gradcam_heatmap(img_batch, self.model, GRADCAM_LAYER)
-        assert heatmap.min() >= 0.0, "Heatmap minimum should be >= 0"
-        assert heatmap.max() <= 1.0 + 1e-6, f"Heatmap maximum {heatmap.max()} should be <= 1"
-
-    def test_save_and_display_gradcam_returns_pil(self):
-        from PIL import Image as PILImage
-        from src.preprocess import preprocess_image
-        from src.gradcam import make_gradcam_heatmap, save_and_display_gradcam
-        from src.config import GRADCAM_LAYER
-        import cv2
-
-        img = preprocess_image(self.img_path)
-        img_batch = img.astype(np.float32)[np.newaxis]
-
-        heatmap = make_gradcam_heatmap(img_batch, self.model, GRADCAM_LAYER)
-
-        # Overwrite temp file with BGR version (as save_and_display_gradcam reads with PIL)
-        cv2.imwrite(self.img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-
-        result = save_and_display_gradcam(self.img_path, heatmap)
-        assert isinstance(result, PILImage.Image), (
-            f"save_and_display_gradcam should return PIL.Image, got {type(result)}"
-        )
-        assert result.size[0] > 0 and result.size[1] > 0
-
-    def test_get_base_model_from_loaded(self):
-        """Simulate a disk-loaded model (no .base_model attr) and verify get_base_model still works."""
-        import tensorflow as tf
-        from src.gradcam import get_base_model
-
-        # Strip the attribute to simulate post-load_model state
-        model_copy = self.model
-        if hasattr(model_copy, "base_model"):
-            delattr(model_copy, "base_model")
-
-        base = get_base_model(model_copy)
-        assert isinstance(base, tf.keras.Model)
-
-
-# ---------------------------------------------------------------------------
-# Entry point for running without pytest
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import traceback
-
-    suites = [TestPreprocessImage, TestBuildModel, TestGradCAM]
-    passed = 0
-    failed = 0
-
-    for suite_cls in suites:
-        suite = suite_cls()
-        methods = [m for m in dir(suite) if m.startswith("test_")]
-        for method_name in methods:
-            suite.setup_method()
-            try:
-                getattr(suite, method_name)()
-                print(f"  PASS  {suite_cls.__name__}::{method_name}")
-                passed += 1
-            except Exception:
-                print(f"  FAIL  {suite_cls.__name__}::{method_name}")
-                traceback.print_exc()
-                failed += 1
-            finally:
-                suite.teardown_method()
-
-    print(f"\n{'='*50}")
-    print(f"Results: {passed} passed, {failed} failed")
-    sys.exit(0 if failed == 0 else 1)
+    unittest.main()
