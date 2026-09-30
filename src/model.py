@@ -1,151 +1,93 @@
 """
-Model architecture module.
-Builds the selected backbone and handles the 2-phase fine-tuning logic.
+CNN with transfer learning.
+
+Why EfficientNetB0?  It reaches strong ImageNet accuracy with only ~4M parameters
+(compound scaling of depth/width/resolution), so it trains quickly on a free Colab
+T4 GPU and is small enough (~17 MB) to ship inside the web app. ResNet50 (larger,
+~24M) and MobileNetV2 (smaller, faster, less accurate) are compared in
+src/experiments.py.
+
+Transfer learning in two phases:
+  Phase 1 - backbone frozen, only the new head (GAP -> BatchNorm -> Dropout -> Dense)
+            is trained with a high learning rate (1e-3).
+  Phase 2 - the top N backbone layers are unfrozen and fine-tuned with a very small
+            learning rate (1e-5); BatchNorm layers stay frozen so their ImageNet
+            statistics are not destroyed by small batches.
 """
-import tensorflow as tf
-from tensorflow.keras.layers import GlobalAveragePooling2D, BatchNormalization, Dropout, Dense, Input
-from tensorflow.keras.models import Model
-from tensorflow.keras.applications import EfficientNetB0, ResNet50, MobileNetV2
+from __future__ import annotations
 
-from src.config import IMG_SIZE, NUM_CLASSES, BACKBONE
+from typing import Dict
 
-def get_backbone(backbone_name, input_tensor):
-    """
-    Returns the selected backbone model loaded with ImageNet weights.
-    """
-    if backbone_name == "EfficientNetB0":
-        base_model = EfficientNetB0(weights='imagenet', include_top=False, input_tensor=input_tensor)
-    elif backbone_name == "ResNet50":
-        base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=input_tensor)
-    elif backbone_name == "MobileNetV2":
-        base_model = MobileNetV2(weights='imagenet', include_top=False, input_tensor=input_tensor)
-    else:
-        raise ValueError(f"Unsupported backbone: {backbone_name}")
-        
-    return base_model
+import keras
+import numpy as np
 
-def build_model(backbone_name=BACKBONE):
-    """
-    Builds the complete model with the swappable backbone and a custom classification head.
-    """
-    inputs = Input(shape=(*IMG_SIZE, 3))
-    
-    # Load the base model and treat it as a sub-model (keeps layers grouped nicely)
-    base_model = get_backbone(backbone_name, inputs)
-    
-    # Add custom head on top of the base model output
-    x = base_model.output
-    x = GlobalAveragePooling2D(name="head_gap")(x)
-    x = BatchNormalization(name="head_bn")(x)
-    x = Dropout(0.3, name="head_dropout")(x)
-    outputs = Dense(NUM_CLASSES, activation='softmax', name="head_classifier")(x)
-    
-    model = Model(inputs=inputs, outputs=outputs, name=f"DR_Classifier_{backbone_name}")
-    
-    # Store reference to base_model for easier freezing/unfreezing logic
-    model.base_model = base_model
-    return model
+from . import config as C
 
-def configure_phase_1(model):
+BACKBONES = {
+    "efficientnetb0": keras.applications.EfficientNetB0,
+    "mobilenetv2": keras.applications.MobileNetV2,
+    "resnet50": keras.applications.ResNet50,
+}
+
+
+def _preprocess_layer(backbone_name: str) -> keras.layers.Layer:
+    """Input scaling that each backbone expects (input images are float 0-255)."""
+    if backbone_name == "mobilenetv2":                       # expects [-1, 1]
+        return keras.layers.Rescaling(1 / 127.5, offset=-1.0, name="preprocess")
+    if backbone_name == "resnet50":                          # expects BGR, mean-subtracted
+        return keras.layers.Lambda(lambda x: keras.applications.resnet50.preprocess_input(x), name="preprocess")
+    return keras.layers.Rescaling(1.0, name="preprocess")    # EfficientNet rescales internally
+
+
+def build_model(backbone_name: str = "efficientnetb0", dropout: float = C.DROPOUT, weights: str | None = "imagenet",
+                num_classes: int = C.NUM_CLASSES) -> keras.Model:
+    """Backbone (named 'backbone') + classification head.
+
+    Layer names are fixed ('preprocess', 'backbone', 'gap', 'head_bn', 'dropout',
+    'predictions') because Grad-CAM and the web app look layers up by name.
     """
-    Configures Phase 1: Freezes the base model, compiles to train only the head.
-    Learning rate = 1e-3.
-    """
-    # Freeze the entire base model
-    for layer in model.base_model.layers:
+    base = BACKBONES[backbone_name](include_top=False, weights=weights, input_shape=(C.IMG_SIZE, C.IMG_SIZE, 3),
+                                    name=C.BACKBONE_LAYER_NAME)
+    base.trainable = False
+    inputs = keras.Input(shape=(C.IMG_SIZE, C.IMG_SIZE, 3), name="image")
+    x = _preprocess_layer(backbone_name)(inputs)
+    x = base(x, training=False)          # training=False keeps BatchNorm in inference mode, also during fine-tuning
+    x = keras.layers.GlobalAveragePooling2D(name="gap")(x)
+    x = keras.layers.BatchNormalization(name="head_bn")(x)
+    x = keras.layers.Dropout(dropout, name="dropout")(x)
+    outputs = keras.layers.Dense(num_classes, activation="softmax", name="predictions")(x)
+    return keras.Model(inputs, outputs, name=f"dr_{backbone_name}")
+
+
+def get_base_model(model: keras.Model) -> keras.Model:
+    """Return the pretrained sub-model (works after load_model too)."""
+    return model.get_layer(C.BACKBONE_LAYER_NAME)
+
+
+def compile_model(model: keras.Model, lr: float) -> None:
+    model.compile(optimizer=keras.optimizers.Adam(lr), loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+
+
+def configure_phase1(model: keras.Model, lr: float = C.HEAD_LR) -> None:
+    """Freeze the whole backbone; train only the head."""
+    get_base_model(model).trainable = False
+    compile_model(model, lr)
+
+
+def configure_phase2(model: keras.Model, unfreeze_layers: int = C.UNFREEZE_LAYERS, lr: float = C.FINETUNE_LR) -> None:
+    """Unfreeze the last `unfreeze_layers` backbone layers (except BatchNorm) and recompile."""
+    base = get_base_model(model)
+    base.trainable = True
+    for layer in base.layers[:-unfreeze_layers]:
         layer.trainable = False
-        
-    # Ensure head layers are trainable
-    head_layer_names = ["head_gap", "head_bn", "head_dropout", "head_classifier"]
-    for layer in model.layers:
-        if layer.name in head_layer_names:
-            layer.trainable = True
-            
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-    model.compile(
-        optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    print("\n--- Model Configured for Phase 1 (Head Only, lr=1e-3) ---")
-    return model
-
-def configure_phase_2(model, unfreeze_layers=30):
-    """
-    Configures Phase 2: Unfreezes the top N non-BN layers of the backbone for fine-tuning.
-
-    BatchNorm freezing rationale
-    ----------------------------
-    Only the *backbone's* BatchNormalization layers are kept frozen here.
-    Frozen backbone BN layers use their ImageNet-trained running statistics
-    (mean/variance) as fixed constants, which is critical when fine-tuning
-    on a small medical dataset — updating them would corrupt the statistics
-    that the backbone's weights depend on.
-
-    The head's `head_bn` layer IS intentionally left trainable (set above)
-    because it was freshly initialised and must adapt to the new feature
-    distribution. This is correct and not a contradiction of the BN-freeze rule.
-
-    Learning rate = 1e-5 (10x smaller than Phase 1 to avoid catastrophic forgetting).
-    """
-    # Keep head layers trainable (including head_bn — see docstring)
-    head_layer_names = ["head_gap", "head_bn", "head_dropout", "head_classifier"]
-    for layer in model.layers:
-        if layer.name in head_layer_names:
-            layer.trainable = True
-
-    # Unfreeze the top N layers of the backbone, skipping BatchNorm layers
-    unfrozen_count = 0
-    for layer in reversed(model.base_model.layers):
-        if unfrozen_count >= unfreeze_layers:
+    for layer in base.layers:
+        if isinstance(layer, keras.layers.BatchNormalization):
             layer.trainable = False
-            continue
+    compile_model(model, lr)
 
-        # Keep backbone BatchNorm layers frozen to preserve ImageNet statistics
-        if isinstance(layer, tf.keras.layers.BatchNormalization):
-            layer.trainable = False
-        else:
-            layer.trainable = True
-            unfrozen_count += 1
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5)
-    model.compile(
-        optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    print(f"\n--- Model Configured for Phase 2 (Fine-tuning top {unfreeze_layers} backbone layers, lr=1e-5) ---")
-    return model
-
-def print_model_parameters(model):
-    """
-    Prints a breakdown of trainable vs frozen parameters.
-    """
-    trainable_params = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
-    non_trainable_params = sum([tf.keras.backend.count_params(w) for w in model.non_trainable_weights])
-    total_params = trainable_params + non_trainable_params
-    
-    print(f"Total Parameters:      {total_params:,}")
-    print(f"Trainable Parameters:  {trainable_params:,}")
-    print(f"Frozen Parameters:     {non_trainable_params:,}")
-    
-def display_summary():
-    """
-    Showcase the model building and parameter changes across phases.
-    """
-    print(f"Building model with {BACKBONE} backbone...")
-    model = build_model()
-    
-    # Phase 1
-    model = configure_phase_1(model)
-    print_model_parameters(model)
-    
-    # Phase 2
-    model = configure_phase_2(model, unfreeze_layers=30)
-    print_model_parameters(model)
-    
-    print("\n--- Full Model Summary (Phase 2 state) ---")
-    model.summary()
-
-if __name__ == "__main__":
-    display_summary()
+def parameter_counts(model: keras.Model) -> Dict[str, int]:
+    """Trainable / frozen / total parameters (for the report)."""
+    trainable = int(sum(int(np.prod(w.shape)) for w in model.trainable_weights))
+    total = int(model.count_params())
+    return {"trainable": trainable, "frozen": total - trainable, "total": total}
