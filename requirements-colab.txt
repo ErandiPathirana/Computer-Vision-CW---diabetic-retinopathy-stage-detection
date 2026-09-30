@@ -1,0 +1,5 @@
+# Only packages that are NOT preinstalled on Google Colab.
+# (TensorFlow, numpy, pandas, scikit-learn, matplotlib, pillow and OpenCV already exist there;
+#  re-installing them can break the runtime.)
+tqdm
+tabulate

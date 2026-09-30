@@ -1,88 +1,88 @@
 """
-Configuration file containing paths and hyperparameters.
-Compatible with Google Colab (/content/...) and Windows local execution.
+Central configuration for the DR stage detection project.
 
-Path resolution strategy
-------------------------
-REPO_ROOT is derived from this file's own location (src/config.py → parent.parent),
-so it works regardless of the current working directory.
-An environment variable DR_REPO_ROOT can override it when needed.
+Every path and hyper-parameter lives here so that the notebook, the training
+scripts and the web app all agree with each other. Nothing in this file imports
+TensorFlow, so it is cheap to import anywhere (tests, web server, Colab).
 """
+from pathlib import Path
 import os
-import pathlib
 
-# -----------------
-# Hyperparameters  (DO NOT CHANGE — kept identical for result reproducibility)
-# -----------------
-IMG_SIZE = (224, 224)
-BATCH_SIZE = 32
-SEED = 42
-BACKBONE = "EfficientNetB0"  # Options: "EfficientNetB0", "ResNet50", "MobileNetV2"
+# --------------------------------------------------------------------------- #
+# Environment detection: Colab keeps data on /content, a laptop keeps it in the
+# repository folder. REPO_ROOT is derived from this file, so no absolute path
+# to one particular machine is ever hard-coded.
+# --------------------------------------------------------------------------- #
+REPO_ROOT = Path(__file__).resolve().parent.parent
+IN_COLAB = ("COLAB_RELEASE_TAG" in os.environ) or Path("/content/sample_data").exists()
 
-# -----------------
-# Class Definition
-# -----------------
-CLASS_NAMES = ["No DR", "Mild", "Moderate", "Severe", "Proliferative"]
+DATA_ROOT = Path("/content/data") if IN_COLAB else REPO_ROOT / "data"
+EXTRACT_DIR = DATA_ROOT / "extracted"       # raw unzip target (temporary)
+RAW_DIR = DATA_ROOT / "raw"                 # cleaned copy used by the project
+IMG_DIR = RAW_DIR / "train_images"          # the labelled fundus images
+CSV_PATH = RAW_DIR / "train.csv"            # columns: id_code, diagnosis
+PROCESSED_DIR = DATA_ROOT / "processed"     # cache of preprocessed 224x224 PNGs
+
+# Google Drive source (no Kaggle credentials are needed)
+DRIVE_MOUNT = "/content/drive"
+DRIVE_ZIP_NAME = "Images and train file.zip"
+
+# Outputs (results/ is git-ignored except what we choose to export)
+RESULTS_DIR = REPO_ROOT / "results"
+SPLIT_DIR = RESULTS_DIR / "splits"
+EDA_DIR = RESULTS_DIR / "eda"
+PREPROC_DIR = RESULTS_DIR / "preprocessing"
+AUG_DIR = RESULTS_DIR / "augmentation"
+TRAIN_DIR = RESULTS_DIR / "training"
+EVAL_DIR = RESULTS_DIR / "evaluation"
+EXPERIMENT_DIR = RESULTS_DIR / "experiments"
+
+MODELS_DIR = REPO_ROOT / "models"                    # what the web app loads
+ASSETS_DIR = REPO_ROOT / "webapp" / "assets"         # small figures for the web app
+BEST_MODEL_PATH = RESULTS_DIR / "best_model.keras"   # written by training
+EXPORT_MODEL_PATH = MODELS_DIR / "best_model.keras"  # copy used by the web app
+
+# --------------------------------------------------------------------------- #
+# Classes (ICDR / APTOS labelling)
+# --------------------------------------------------------------------------- #
+CLASS_NAMES = ["No DR", "Mild", "Moderate", "Severe", "Proliferative DR"]
 NUM_CLASSES = len(CLASS_NAMES)
 
-# -----------------
-# Grad-CAM layer name (single source of truth)
-# -----------------
-# EfficientNetB0's final conv layer is "top_conv".
-# Change this constant if you swap the backbone.
-GRADCAM_LAYER_MAP = {
-    "EfficientNetB0": "top_conv",
-    "ResNet50": "conv5_block3_out",
-    "MobileNetV2": "out_relu",
-}
-GRADCAM_LAYER = GRADCAM_LAYER_MAP.get(BACKBONE, "top_conv")
+# --------------------------------------------------------------------------- #
+# Fixed constants (kept unchanged across the project)
+# --------------------------------------------------------------------------- #
+IMG_SIZE = 224
+BATCH_SIZE = 32
+SEED = 42
+SPLIT_RATIOS = (0.70, 0.15, 0.15)   # train / validation / test, stratified
 
-# -----------------
-# Paths — cross-platform (Colab + Windows)
-# -----------------
-# This file lives at <repo>/src/config.py → parent = src/ → parent.parent = repo root
-_THIS_FILE = pathlib.Path(__file__).resolve()
-_DEFAULT_REPO_ROOT = _THIS_FILE.parent.parent  # e.g. /content/<repo> or C:\<repo>
+# Training hyper-parameters
+DROPOUT = 0.3
+HEAD_LR = 1e-3          # phase 1: only the new classification head is trained
+FINETUNE_LR = 1e-5      # phase 2: top backbone layers are fine-tuned
+UNFREEZE_LAYERS = 30
+PHASE1_EPOCHS = 15
+PHASE2_EPOCHS = 20
+EARLY_STOP_PATIENCE = 6
+LR_PATIENCE = 3
+LR_FACTOR = 0.5
 
-# Allow an env-var override for special layouts (e.g. mounted Drive folders)
-REPO_ROOT = pathlib.Path(os.environ.get("DR_REPO_ROOT", _DEFAULT_REPO_ROOT))
+# Preprocessing parameters
+CLAHE_CLIP = 2.0
+CLAHE_TILE = (8, 8)
+DENOISE_KSIZE = 3
+UNSHARP_SIGMA = 2.0
+UNSHARP_AMOUNT = 0.5
+BLACK_THRESHOLD = 7
 
-# Raw dataset inputs — placed outside the repo so they survive a repo re-clone.
-# On Colab this resolves to /content/data/raw (matches legacy path).
-# On Windows it resolves to <repo>/../data/raw (next to the repo folder).
-DATA_DIR = REPO_ROOT.parent / "data"
-RAW_DATA_DIR = DATA_DIR / "raw"
-PROCESSED_DATA_DIR = DATA_DIR / "processed"
+# Web app
+LOW_CONFIDENCE_THRESHOLD = 0.6
 
-# Dataset-specific paths (APTOS 2019)
-TRAIN_IMAGES_DIR = RAW_DATA_DIR / "train_images"
-TEST_IMAGES_DIR  = RAW_DATA_DIR / "test_images"
-TRAIN_CSV        = RAW_DATA_DIR / "train.csv"
-TEST_CSV         = RAW_DATA_DIR / "test.csv"
+BACKBONE_LAYER_NAME = "backbone"   # name of the pretrained sub-model (used by Grad-CAM)
 
-# Outputs — always inside the repo's results/ folder
-RESULTS_DIR = REPO_ROOT / "results"
-MODELS_DIR  = RESULTS_DIR / "models"
-LOGS_DIR    = RESULTS_DIR / "logs"
 
-# Canonical best-model path (written by train.py, read by evaluate.py and app.py)
-BEST_MODEL_PATH = RESULTS_DIR / "best_model.keras"
-
-# -----------------
-# Convert pathlib.Path objects to str for libraries that don't accept Path objects
-# (os.path.join, pandas, cv2, etc. all accept str; TF/Keras accept both)
-# -----------------
-DATA_DIR           = str(DATA_DIR)
-RAW_DATA_DIR       = str(RAW_DATA_DIR)
-PROCESSED_DATA_DIR = str(PROCESSED_DATA_DIR)
-TRAIN_IMAGES_DIR   = str(TRAIN_IMAGES_DIR)
-TEST_IMAGES_DIR    = str(TEST_IMAGES_DIR)
-TRAIN_CSV          = str(TRAIN_CSV)
-TEST_CSV           = str(TEST_CSV)
-RESULTS_DIR        = str(RESULTS_DIR)
-MODELS_DIR         = str(MODELS_DIR)
-LOGS_DIR           = str(LOGS_DIR)
-BEST_MODEL_PATH    = str(BEST_MODEL_PATH)
-
-# NOTE: Output directories are created lazily by the functions that need them,
-# NOT at import time — avoids creating folders on systems where they're irrelevant.
+def ensure_dirs() -> None:
+    """Create output folders on demand (never at import time)."""
+    for d in (RESULTS_DIR, SPLIT_DIR, EDA_DIR, PREPROC_DIR, AUG_DIR, TRAIN_DIR,
+              EVAL_DIR, EXPERIMENT_DIR, MODELS_DIR, ASSETS_DIR):
+        d.mkdir(parents=True, exist_ok=True)

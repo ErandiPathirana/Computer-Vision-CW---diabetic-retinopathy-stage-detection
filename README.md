@@ -1,74 +1,54 @@
-# Diabetic Retinopathy Stage Detection
+# Diabetic Retinopathy Stage Detection (Computer Vision coursework)
 
-## 1. Project Overview
-This repository contains the complete deep learning pipeline for a university Computer Vision coursework focused on Diabetic Retinopathy (DR) stage detection. The goal is to build a robust, reproducible computer vision pipeline capable of classifying retinal fundus images into five severity stages (0: No DR, 1: Mild, 2: Moderate, 3: Severe, 4: Proliferative) using a customized EfficientNetB0 backbone.
+Classifies retinal fundus photographs into five diabetic retinopathy stages using transfer learning
+(EfficientNetB0), with CLAHE-based preprocessing, augmentation, class-imbalance handling, evaluation,
+error analysis and Grad-CAM explanations. Educational prototype, **not a medical device**.
 
-The pipeline specifically addresses data leakage prevention, class imbalance, specialized medical image preprocessing (CLAHE), and model interpretability via Grad-CAM.
+## Pipeline
+```
+Drive zip (APTOS 2019) -> validation & EDA -> stratified 70/15/15 split -> preprocessing
+(crop, resize, denoise, CLAHE, edge enhancement) -> augmentation + class weights -> EfficientNetB0
+transfer learning (2 phases) -> tuning experiments -> evaluation (accuracy, precision, recall, F1,
+confusion matrix, ROC, QWK) -> error analysis + Grad-CAM -> export -> web app
+```
 
-**Repository**: https://github.com/ErandiPathirana/Computer-Vision-CW---diabetic-retinopathy-stage-detection
+## Repository layout
+```
+src/            config, data, preprocess, augment, model, train, experiments, evaluate, gradcam, export_assets
+notebooks/      DR_Stage_Detection.ipynb  (Colab runner, imports from src/)
+tests/          smoke and integration tests
+app/            Gradio fallback demo
+webapp/         OcuGrade web app: server.py, inference.py, report.py, static/ (HTML, CSS, JS), assets/
+docs/           assignment brief + checklist, model card, progress notes
+data/README.md  how to provide the dataset (images are not in the repo)
+```
 
-```bash
-git clone https://github.com/ErandiPathirana/Computer-Vision-CW---diabetic-retinopathy-stage-detection.git
-cd Computer-Vision-CW---diabetic-retinopathy-stage-detection
+## How to run in Google Colab
+1. Put `Images and train file.zip` (APTOS images + labelled CSV) in your Google Drive (see `data/README.md`).
+2. Open the notebook: `https://colab.research.google.com/github/ErandiPathirana/Computer-Vision-CW---diabetic-retinopathy-stage-detection/blob/main/notebooks/DR_Stage_Detection.ipynb`
+3. Runtime > Change runtime type > **T4 GPU**, then run all cells from top to bottom.
+4. The last cell exports `export.zip` (model + figures) for the web app.
+
+## How to run locally (tests and web app)
+```
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
+python -m pytest tests -q
 ```
+Use the same TensorFlow version as the Colab run (printed by the notebook).
 
-## 2. Dataset
-The project utilizes the **APTOS 2019 Blindness Detection** dataset (via Kaggle).
-- **Classes**: 5 distinct severity stages.
-- **Challenges**: Severe class imbalance (heavy skew towards 'No DR'), varying lighting conditions, field-of-view differences, camera artifacts, and inter-rater label noise.
-
-## 3. Pipeline Diagram
-
-```mermaid
-flowchart TD
-    A[Raw Kaggle Dataset] --> B(Data Loader & Stratified Split)
-    B --> C{70/15/15 Split}
-    C -->|Train| D[Preprocessing]
-    C -->|Val/Test| D
-    
-    D --> E[Crop Black Borders]
-    E --> F[Resize 224x224]
-    F --> G[LAB CLAHE]
-    G --> H[Gaussian Denoise]
-    H --> I[Unsharp Masking]
-    
-    I --> J{Data Augmentation}
-    J -->|Train Only| K[Flip, Rotate, Zoom, Jitter]
-    J -->|Val/Test| L[Pristine / No Augmentation]
-    
-    K --> M(Phase 1: Train Head)
-    L --> M
-    M --> N(Phase 2: Fine-tune Backbone)
-    
-    N --> O[Evaluation & Metrics]
-    N --> P[Grad-CAM Interpretability]
-    P --> Q[Gradio Web App]
+## Web app (OcuGrade)
+After the Colab run, unzip `export.zip` into the project folder (it creates `models/` and `webapp/assets/`), then:
 ```
-
-## 4. Folder Structure
-
-- `app/`: Contains the interactive Gradio web application.
-- `docs/`: Practical discussion and theoretical documentation.
-- `notebooks/`: Contains the main Colab runner notebook (`DR_Stage_Detection.ipynb`).
-- `results/`: Output directory (ignored by git) for data splits, logs, model checkpoints, and evaluation plots.
-  - `results/best_model.keras` — canonical best model (written by training, read by evaluate + app)
-  - `results/models/metrics.json` — accuracy, macro P/R/F1, QWK, per-class report, confusion matrix
-  - `results/models/class_names.json` — ordered list of class names
-- `src/`: Core modular source code.
-  - `config.py`: Centralized hyperparameters and cross-platform paths (Colab + Windows).
-  - `data.py`: Kaggle downloading, EDA, and class-weight calculations.
-  - `data_loader.py`: Strict, leakage-free stratified splitting.
-  - `preprocess.py`: Medical image processing (CLAHE, unsharp masking).
-  - `augment.py`: `tf.data` pipelines and training augmentations.
-  - `model.py`: Backbone construction and 2-phase freezing logic.
-  - `train.py`: Callbacks, training loops, and hyperparameter experiments.
-  - `evaluate.py`: QWK, Classification Report, ROC/AUC, error analysis, JSON metric export.
-  - `gradcam.py`: Visual explainability module (works on disk-loaded models).
-- `tests/test_smoke.py`: Smoke tests (model build, preprocessing, Grad-CAM shapes).
-
-## 5. Running the Smoke Tests
-
-```bash
-python -m pytest tests/test_smoke.py -v
+.venv\Scripts\activate
+python -m webapp.server --open        # or double-click run_app.bat
 ```
+Open http://localhost:8080. Pages: **Analyze** (upload, pipeline viewer, severity gauge, probabilities, Grad-CAM with opacity
+slider, low-confidence warning, PDF report), **Dataset & Pipeline**, **Model & Training**, **Evaluation** (metrics, confusion
+matrix, ROC, error analysis) and **Impact & Ethics**. Uploaded images are processed in memory and never stored.
+Optional demo images for the "Try a sample" buttons go in `webapp/samples/` (git-ignored, competition data).
+
+## Limitations and ethics
+Small single-source dataset, class imbalance, 224x224 downscaling, noisy labels and unknown demographics.
+False negatives on severe disease are the main clinical risk; a clinician must review every result.

@@ -35,3 +35,24 @@ kaggle.json
 logs/
 runs/
 tensorboard_logs/
+
+# ---- Project-specific (DR coursework) ----
+data/raw/
+data/extracted/
+data/processed/
+*.zip
+kaggle.json
+.venv/
+results/
+logs/
+tensorboard/
+checkpoints/
+saved_models/
+*.h5
+*.pt
+*.pth
+# keep the small final model for the web app, ignore every other model file
+*.keras
+!models/best_model.keras
+webapp/samples/
+export/
