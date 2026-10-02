@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -31,6 +32,63 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
 # --------------------------------------------------------------------------- #
 # 1. Loading the dataset from Google Drive
 # --------------------------------------------------------------------------- #
+# Kaggle DR datasets use different column names / layouts, so the loader understands:
+#   (a) a labelled CSV (id_code,diagnosis  or  image,level  or ...) + a folder of images, and
+#   (b) images stored in class folders (0,1,2,3,4  or  No_DR, Mild, Moderate, Severe, Proliferative_DR).
+ID_ALIASES = ["id_code", "image", "image_id", "id", "filename", "file_name", "image_name", "name"]
+LABEL_ALIASES = ["diagnosis", "level", "label", "grade", "dr_grade", "stage", "severity", "class"]
+
+
+FOLDER_HINTS = ["No_DR", "Mild", "Moderate", "Severe", "Proliferate_DR"]   # typical folder names, used in messages
+
+
+def _norm(text: str) -> str:
+    """lower-case, non-alphanumerics -> '_' (so 'No DR', 'no-dr' and 'No_DR' all match)."""
+    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+
+
+def grade_from_name(name) -> Optional[int]:
+    """Map a folder name or label text to a DR grade 0-4 (None if it is not a grade name)."""
+    n = _norm(name)
+    if n in {"0", "1", "2", "3", "4"}:
+        return int(n)
+    m = re.fullmatch(r"(?:grade|class|stage|level|dr)_?([0-4])", n)
+    if m:
+        return int(m.group(1))
+    if "proliferat" in n and not n.startswith("non"):
+        return 4
+    if n == "pdr":
+        return 4
+    if "severe" in n:
+        return 3
+    if "moderate" in n:
+        return 2
+    if "mild" in n:
+        return 1
+    if n in {"no_dr", "nodr", "normal", "none", "no_apparent_dr", "healthy", "no_diabetic_retinopathy"}:
+        return 0
+    return None
+
+
+def standardize_table(d: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Return a dataframe with columns id_code, diagnosis (ints 0-4), or None if d is not a label table."""
+    d = d.rename(columns=lambda c: str(c).replace("\ufeff", "").strip())      # Excel adds a hidden BOM / spaces
+    lower = {str(c).lower(): c for c in d.columns}
+    id_col = next((lower[a] for a in ID_ALIASES if a in lower), None)
+    lab_col = next((lower[a] for a in LABEL_ALIASES if a in lower), None)
+    if id_col is None or lab_col is None:
+        return None
+    out = pd.DataFrame({"id_code": d[id_col].astype(str)})
+    labels = d[lab_col]
+    if pd.api.types.is_numeric_dtype(labels):
+        out["diagnosis"] = labels
+    else:
+        out["diagnosis"] = labels.map(grade_from_name)
+    out = out.dropna(subset=["diagnosis"])
+    out["diagnosis"] = out["diagnosis"].astype(int)
+    return out if len(out) else None
+
+
 def mount_drive() -> None:
     """Mount Google Drive (Colab only)."""
     try:
@@ -41,11 +99,7 @@ def mount_drive() -> None:
 
 
 def find_drive_zip(zip_name: str = C.DRIVE_ZIP_NAME, root: str = C.DRIVE_MOUNT + "/MyDrive") -> Path:
-    """Search Drive recursively for the dataset zip.
-
-    First tries an exact (case-insensitive) file-name match. If nothing is found
-    it lists every zip file it saw, so the user can copy the right name.
-    """
+    """Search Drive recursively for the dataset zip (exact name, case-insensitive)."""
     seen: List[Path] = []
     wanted = zip_name.lower()
     for dirpath, _, files in os.walk(root):
@@ -62,23 +116,46 @@ def find_drive_zip(zip_name: str = C.DRIVE_ZIP_NAME, root: str = C.DRIVE_MOUNT +
     )
 
 
-def _find_image_folder(root: Path) -> Path:
-    """Return the sub-folder that contains the most image files."""
-    best, best_n = None, 0
-    for dirpath, _, files in os.walk(root):
-        n = sum(f.lower().endswith(IMAGE_EXTS) for f in files)
-        if n > best_n:
-            best, best_n = Path(dirpath), n
-    if best is None:
-        raise RuntimeError(f"No images were found inside {root}.")
-    return best
+def _list_images(root: Path) -> List[Path]:
+    return [Path(d) / f for d, _, fs in os.walk(root) for f in fs if f.lower().endswith(IMAGE_EXTS)]
 
 
-def _find_label_csv(search_dirs: List[Path]) -> Path:
-    """Find the labelled CSV (columns 'id_code' and 'diagnosis').
+def inspect_dataset_folder(root: Path = C.EXTRACT_DIR, top: int = 15) -> None:
+    """Print what is inside the dataset folder (images per folder, CSV files and their label counts).
 
-    Kaggle's sample_submission.csv also has these two columns, but every label in it is 0,
-    so a CSV whose labels are all identical is rejected. Files called train.csv are preferred.
+    Run this when something looks wrong; the output is also useful in the report.
+    """
+    root = Path(root)
+    per_dir: Dict[str, int] = {}
+    csvs = []
+    for d, _, fs in os.walk(root):
+        n = sum(f.lower().endswith(IMAGE_EXTS) for f in fs)
+        if n:
+            per_dir[str(Path(d).relative_to(root))] = n
+        csvs += [Path(d) / f for f in fs if f.lower().endswith(".csv")]
+    print(f"Folder: {root}")
+    print(f"Total images: {sum(per_dir.values())}")
+    for d, n in sorted(per_dir.items(), key=lambda kv: -kv[1])[:top]:
+        print(f"  {n:>6} images in  {d or '.'}")
+    if not csvs:
+        print("No CSV files found.")
+    for p in csvs:
+        try:
+            d = pd.read_csv(p)
+        except Exception as exc:
+            print(f"CSV {p.name}: unreadable ({exc})")
+            continue
+        std = standardize_table(d)
+        info = (f"labels {std['diagnosis'].value_counts().sort_index().to_dict()}" if std is not None
+                else "no usable id/label columns")
+        print(f"CSV {p.name}: {d.shape[0]} rows, columns {list(d.columns)} -> {info}")
+
+
+def _find_label_csv(search_dirs: List[Path]) -> Tuple[Path, pd.DataFrame]:
+    """Find a labelled CSV and return (path, standardised id_code/diagnosis table).
+
+    CSVs whose labels are all identical (Kaggle's sample_submission.csv is all zeros) are
+    rejected. Files called train.csv are preferred, then the file with the most rows.
     """
     candidates, notes = [], []
     for base in search_dirs:
@@ -88,57 +165,107 @@ def _find_label_csv(search_dirs: List[Path]) -> Path:
                     continue
                 p = Path(dirpath) / f
                 try:
-                    d = pd.read_csv(p)
+                    raw = pd.read_csv(p)
                 except Exception:
                     continue
-                if not {"id_code", "diagnosis"}.issubset(d.columns):
-                    notes.append(f"{f}: columns {list(d.columns)} (no labels)")
-                elif d["diagnosis"].nunique() < 2:
-                    notes.append(f"{f}: {len(d)} rows but only one distinct label "
-                                 f"({d['diagnosis'].unique().tolist()}), looks like sample_submission.csv")
+                std = standardize_table(raw)
+                if std is None:
+                    notes.append(f"{f}: columns {list(raw.columns)} (no labels)")
+                elif std["diagnosis"].nunique() < 2:
+                    notes.append(f"{f}: {len(std)} rows but only one distinct label "
+                                 f"({std['diagnosis'].unique().tolist()}), looks like sample_submission.csv")
                 else:
-                    candidates.append((p.name.lower() != "train.csv", -len(d), p))
+                    candidates.append((p.name.lower() != "train.csv", -len(std), str(p), p, std))
     if candidates:
-        return sorted(candidates)[0][2]
-    raise RuntimeError(
-        "No labelled CSV found. You need the Kaggle APTOS file 'train.csv' (columns id_code and diagnosis with grades 0-4) "
-        "together with the matching 'train_images'. The unlabelled test.csv and sample_submission.csv cannot be used for "
-        "training. CSV files seen: " + ("; ".join(notes) or "none")
-    )
+        best = sorted(candidates, key=lambda c: c[:3])[0]
+        return best[3], best[4]
+    raise RuntimeError("No labelled CSV found. CSV files seen: " + ("; ".join(notes) or "none"))
 
 
-def load_dataset_from_drive(zip_path: Optional[str] = None, force: bool = False) -> pd.DataFrame:
-    """Copy the dataset from Google Drive into the layout the project expects.
+def _frame_from_class_folders(root: Path) -> pd.DataFrame:
+    """Build id_code / diagnosis / path from folders named after the grades (0..4 or No_DR, Mild, ...)."""
+    rows = []
+    for d, _, fs in os.walk(root):
+        grade = grade_from_name(Path(d).name)
+        if grade is None:
+            continue
+        for f in sorted(fs):
+            if f.lower().endswith(IMAGE_EXTS):
+                rows.append((grade, str(Path(d) / f)))
+    df = pd.DataFrame(rows, columns=["diagnosis", "path"])
+    if df["diagnosis"].nunique() < 2:
+        return pd.DataFrame()
+    df["id_code"] = [f"{i:05d}_{Path(p).stem}" for i, p in enumerate(df["path"])]   # unique, file-name safe
+    return df[["id_code", "diagnosis", "path"]]
 
-    Steps: mount Drive -> locate zip -> unzip on the fast local disk -> move the
-    image folder to RAW_DIR/train_images -> copy the labelled CSV to RAW_DIR/train.csv
-    -> validate. Returns the validated dataframe.
+
+def _attach_paths(table: pd.DataFrame, root: Path) -> pd.DataFrame:
+    """Find each CSV id's image anywhere under root (matches with or without file extension)."""
+    by_name, by_stem = {}, {}
+    for p in sorted(_list_images(root), key=lambda q: ("train" not in str(q).lower(), str(q))):
+        by_name.setdefault(p.name.lower(), str(p))
+        by_stem.setdefault(p.stem.lower(), str(p))
+    ids = table["id_code"].astype(str)
+    table = table.copy()
+    table["path"] = [by_name.get(i.lower()) or by_stem.get(Path(i).stem.lower()) or "" for i in ids]
+    return table
+
+
+LOADER_VERSION = "2.2 (finds images by file name in all folders; checks every grade)"
+
+
+def load_dataset_from_drive(zip_path: Optional[str] = None, force: bool = False,
+                            source_dir: Optional[str] = None) -> pd.DataFrame:
+    """Copy the dataset from Google Drive into Colab and return the validated dataframe.
+
+    Steps: mount Drive -> unzip on the fast local disk (or copy an already-unzipped Drive folder
+    given as source_dir) -> find the labels (CSV, or class folders) -> validate -> save
+    RAW_DIR/train.csv (columns id_code, diagnosis, path). Stops with a clear message on problems.
     """
+    print("Dataset loader version:", LOADER_VERSION)
     C.RAW_DIR.mkdir(parents=True, exist_ok=True)
-    if C.CSV_PATH.exists() and C.IMG_DIR.exists() and not force:
-        print("Dataset already prepared, skipping. (use force=True to redo)")
-        return validate_dataset(pd.read_csv(C.CSV_PATH))
+    if C.CSV_PATH.exists() and not force:
+        try:
+            print("Dataset already prepared (use force=True to redo).")
+            return validate_dataset(pd.read_csv(C.CSV_PATH))
+        except Exception as exc:
+            print(f"Prepared copy is not usable ({exc}); preparing again.")
 
     mount_drive()
-    zpath = Path(zip_path) if zip_path else find_drive_zip()
-    print("Using zip:", zpath)
-
     if C.EXTRACT_DIR.exists():
         shutil.rmtree(C.EXTRACT_DIR)
-    C.EXTRACT_DIR.mkdir(parents=True)
-    with zipfile.ZipFile(zpath) as zf:
-        zf.extractall(C.EXTRACT_DIR)
+    search_extra: List[Path] = []
+    if source_dir:
+        print("Copying folder from Drive:", source_dir)
+        shutil.copytree(source_dir, C.EXTRACT_DIR)
+    else:
+        zpath = Path(zip_path) if zip_path else find_drive_zip()
+        print("Using zip:", zpath)
+        C.EXTRACT_DIR.mkdir(parents=True)
+        with zipfile.ZipFile(zpath) as zf:
+            zf.extractall(C.EXTRACT_DIR)
+        search_extra.append(zpath.parent)          # a labelled CSV may sit next to the zip in Drive
 
-    img_folder = _find_image_folder(C.EXTRACT_DIR)
-    # The CSV is normally inside the zip; also look next to the zip in Drive.
-    csv_file = _find_label_csv([C.EXTRACT_DIR, zpath.parent])
+    inspect_dataset_folder(C.EXTRACT_DIR)
 
-    if C.IMG_DIR.exists():
-        shutil.rmtree(C.IMG_DIR)
-    shutil.move(str(img_folder), str(C.IMG_DIR))
-    shutil.copy(csv_file, C.CSV_PATH)
-    print(f"Images: {C.IMG_DIR}\nLabels: {C.CSV_PATH} (from {csv_file.name})")
-    return validate_dataset(pd.read_csv(C.CSV_PATH))
+    try:
+        csv_file, table = _find_label_csv([C.EXTRACT_DIR] + search_extra)
+        print(f"Labels: {csv_file.name} ({len(table)} rows)")
+        df = _attach_paths(table, C.EXTRACT_DIR)
+    except RuntimeError as csv_problem:
+        df = _frame_from_class_folders(C.EXTRACT_DIR)
+        if df.empty:
+            raise RuntimeError(
+                f"{csv_problem}\nNo class folders (0-4 or No_DR/Mild/Moderate/Severe/Proliferative_DR) were found either.\n"
+                "This dataset has NO diagnosis labels, so a classifier cannot be trained on it. A test set "
+                "(Kaggle test.csv / test_images) is unlabelled. You need either the labelled 'train.csv' + "
+                "'train_images', or images sorted into one folder per grade."
+            ) from None
+        print(f"No labelled CSV; using class folders ({len(df)} images).")
+
+    df = validate_dataset(df)
+    df.to_csv(C.CSV_PATH, index=False)
+    return df
 
 
 # --------------------------------------------------------------------------- #
@@ -150,15 +277,19 @@ def _resolve_image_paths(df: pd.DataFrame, img_dir: Path) -> pd.Series:
     return df["id_code"].astype(str).map(lambda i: str(on_disk[i]) if i in on_disk else "")
 
 
-def validate_dataset(df: pd.DataFrame, img_dir: Path = C.IMG_DIR, check_readable: bool = True) -> pd.DataFrame:
+def validate_dataset(df: pd.DataFrame, img_dir: Path = C.IMG_DIR, check_readable: bool = True,
+                     require_all_grades: bool = True) -> pd.DataFrame:
     """Check labels and images, report problems, and return a clean dataframe.
 
     The returned dataframe has columns: id_code, diagnosis, path.
     Raises a clear error (never an IndexError) if the data cannot be used.
     """
-    if not {"id_code", "diagnosis"}.issubset(df.columns):
-        raise ValueError(f"CSV needs 'id_code' and 'diagnosis' columns, has {list(df.columns)}")
-    df = df[["id_code", "diagnosis"]].copy()
+    if "path" not in df.columns:
+        std = standardize_table(df)
+        if std is None:
+            raise ValueError(f"CSV needs an id column and a label column (e.g. 'id_code' and 'diagnosis'), has {list(df.columns)}")
+        df = std
+    df = df[[c for c in ("id_code", "diagnosis", "path") if c in df.columns]].copy()
     df["id_code"] = df["id_code"].astype(str)
 
     bad_labels = ~df["diagnosis"].isin(range(C.NUM_CLASSES))
@@ -173,9 +304,25 @@ def validate_dataset(df: pd.DataFrame, img_dir: Path = C.IMG_DIR, check_readable
     dup = int(df["id_code"].duplicated().sum())
     df = df.drop_duplicates("id_code").reset_index(drop=True)
 
-    df["path"] = _resolve_image_paths(df, img_dir)
-    missing = int((df["path"] == "").sum())
-    df = df[df["path"] != ""].reset_index(drop=True)
+    if "path" not in df.columns:
+        df["path"] = _resolve_image_paths(df, img_dir)
+    df["path"] = df["path"].fillna("").astype(str)
+    exists = df["path"].map(lambda p: bool(p) and os.path.isfile(p))
+    missing = int((~exists).sum())
+    labelled_per_grade = df["diagnosis"].value_counts()
+    df = df[exists].reset_index(drop=True)
+
+    if require_all_grades:
+        # A grade that is labelled in the CSV but has no image files at all (e.g. a missing No_DR folder in the zip)
+        # would silently produce a model that can never predict that grade.
+        for g in range(C.NUM_CLASSES):
+            if (df["diagnosis"] == g).sum() == 0:
+                n_rows = int(labelled_per_grade.get(g, 0))
+                why = (f"the labels list {n_rows} images for it but NO image files were found "
+                       f"(is the '{FOLDER_HINTS[g]}' folder missing from the zip?)") if n_rows else "no images or labels exist for it"
+                raise ValueError(f"Grade {g} ({C.CLASS_NAMES[g]}): {why}. All five grades are needed to train a "
+                                 "five-stage classifier. Add the missing images to the zip and run again "
+                                 "(or pass require_all_grades=False to train on fewer grades).")
 
     unreadable = 0
     if check_readable:
@@ -190,17 +337,15 @@ def validate_dataset(df: pd.DataFrame, img_dir: Path = C.IMG_DIR, check_readable
         unreadable = keep.count(False)
         df = df[keep].reset_index(drop=True)
 
+    print(f"Validation: {len(df)} usable images | duplicate ids removed: {dup} | "
+          f"labelled rows without an image file: {missing} | unreadable images: {unreadable}")
+    if len(df) == 0:
+        raise RuntimeError("No labelled images matched. Do the images and the labels come from the same set?")
     if df["diagnosis"].nunique() < 2:
-        raise ValueError(
-            f"Only one class is present (all labels = {df['diagnosis'].iloc[0]}). This is usually sample_submission.csv "
-            "or an unlabelled file. Use the labelled train.csv from the Kaggle APTOS Data tab.")
-    print(f"Validation: {len(df)} usable images | duplicates removed: {dup} | "
-          f"CSV rows without an image: {missing} | unreadable images: {unreadable}")
+        raise ValueError("After removing missing images only one class is left; check that the labels match the images.")
     print("Images per grade:", df["diagnosis"].value_counts().sort_index().to_dict())
     if len(df) < 500:
         print("WARNING: fewer than 500 labelled images. The full APTOS training set has 3662.")
-    if len(df) == 0:
-        raise RuntimeError("No labelled images matched the CSV. Do the zip and CSV come from the same set?")
     return df
 
 
@@ -331,6 +476,10 @@ def make_splits(df: pd.DataFrame, out_dir: Path = C.SPLIT_DIR, seed: int = C.SEE
     """Stratified 70/15/15 split, saved as CSV, with a proof that nothing leaks."""
     out_dir.mkdir(parents=True, exist_ok=True)
     train_r, val_r, test_r = C.SPLIT_RATIOS
+    smallest = df["diagnosis"].value_counts()
+    if smallest.min() < 3:
+        raise ValueError(f"Grade {int(smallest.idxmin())} has only {int(smallest.min())} image(s); at least 3 per grade are "
+                         "needed for a stratified train/val/test split. Check that the labels are correct.")
     train_df, rest = train_test_split(df, test_size=1 - train_r, stratify=df["diagnosis"], random_state=seed)
     val_df, test_df = train_test_split(rest, test_size=test_r / (val_r + test_r), stratify=rest["diagnosis"],
                                        random_state=seed)

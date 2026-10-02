@@ -108,7 +108,7 @@ class TestData(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 D._find_label_csv([root])
             pd.DataFrame({"id_code": list("abc"), "diagnosis": [0, 1, 2]}).to_csv(root / "train.csv", index=False)
-            self.assertEqual(D._find_label_csv([root]).name, "train.csv")
+            self.assertEqual(D._find_label_csv([root])[0].name, "train.csv")
         with self.assertRaises(ValueError):
             D.validate_dataset(pd.DataFrame({"id_code": ["a", "b"], "diagnosis": [0, 0]}), check_readable=False)
 
@@ -119,6 +119,101 @@ class TestData(unittest.TestCase):
     def test_bad_label_range_rejected(self):
         with self.assertRaises(ValueError):
             D.validate_dataset(pd.DataFrame({"id_code": ["a"], "diagnosis": [9]}))
+
+
+class TestDriveLoader(unittest.TestCase):
+    """The loader must cope with the different layouts Kaggle DR datasets come in."""
+
+    def _write_images(self, folder: Path, names):
+        folder.mkdir(parents=True, exist_ok=True)
+        for i, n in enumerate(names):
+            cv2.imwrite(str(folder / n), cv2.cvtColor(fake_fundus(100, 120, i), cv2.COLOR_RGB2BGR))
+
+    def _load(self, source: Path, tmp: Path):
+        """Run load_dataset_from_drive on a local folder with config paths redirected to tmp."""
+        saved = (C.EXTRACT_DIR, C.RAW_DIR, C.CSV_PATH, D.mount_drive)
+        C.EXTRACT_DIR, C.RAW_DIR, C.CSV_PATH = tmp / "ex", tmp / "raw", tmp / "raw" / "train.csv"
+        D.mount_drive = lambda: None
+        try:
+            return D.load_dataset_from_drive(source_dir=str(source), force=True)
+        finally:
+            C.EXTRACT_DIR, C.RAW_DIR, C.CSV_PATH, D.mount_drive = saved
+
+    def test_csv_with_train_images_folder_ignores_sample_submission(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src"
+            ids = [f"id{i}" for i in range(20)]
+            self._write_images(src / "train_images", [f"{i}.png" for i in ids])
+            pd.DataFrame({"id_code": ids, "diagnosis": [i % 5 for i in range(20)]}).to_csv(src / "train.csv", index=False)
+            pd.DataFrame({"id_code": ids, "diagnosis": [0] * 20}).to_csv(src / "sample_submission.csv", index=False)
+            df = self._load(src, Path(t))
+            self.assertEqual(len(df), 20)
+            self.assertEqual(df["diagnosis"].nunique(), 5)
+
+    def test_alias_columns_and_names_with_extension(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src"
+            names = [f"{i}_left.jpeg" for i in range(15)]
+            self._write_images(src / "images", names)
+            pd.DataFrame({"image": names, "level": [i % 5 for i in range(15)]}).to_csv(src / "labels.csv", index=False)
+            df = self._load(src, Path(t))
+            self.assertEqual(len(df), 15)
+            self.assertEqual(sorted(df["diagnosis"].unique()), [0, 1, 2, 3, 4])
+
+    def test_class_folders_without_csv(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src"
+            for folder, grade in (("No_DR", 0), ("Mild", 1), ("Moderate", 2), ("Severe", 3), ("Proliferate_DR", 4)):
+                self._write_images(src / "train" / folder, [f"img{i}.png" for i in range(3)])
+            df = self._load(src, Path(t))
+            self.assertEqual(len(df), 15)
+            self.assertEqual(sorted(df["diagnosis"].unique()), [0, 1, 2, 3, 4])
+            self.assertEqual(df["id_code"].nunique(), 15)            # ids unique although file names repeat
+
+    def test_missing_no_dr_folder_is_reported(self):
+        """Reproduces a zip with train.csv (all 5 grades) but no images for grade 0."""
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src" / "Images and train file"
+            rows = []
+            for folder, grade in (("Mild", 1), ("Moderate", 2), ("Severe", 3), ("Proliferate_DR", 4)):
+                names = [f"g{grade}_{i}.png" for i in range(4)]
+                self._write_images(src / folder, names)
+                rows += [(n[:-4], grade) for n in names]
+            rows += [(f"g0_{i}", 0) for i in range(10)]               # labelled in the CSV, but no image files
+            pd.DataFrame(rows, columns=["id_code", "diagnosis"]).to_csv(src / "train.csv", index=False)
+            with self.assertRaises(ValueError) as ctx:
+                self._load(src.parent, Path(t))
+            self.assertIn("Grade 0 (No DR)", str(ctx.exception))
+            self.assertIn("No_DR", str(ctx.exception))
+
+    def test_excel_csv_with_bom_and_images_in_five_folders(self):
+        """Excel's 'CSV UTF-8' puts a hidden BOM before the first header; all five grade folders hold the images."""
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src" / "Images and train file"
+            rows = []
+            for folder, grade in (("No_DR", 0), ("Mild", 1), ("Moderate", 2), ("Severe", 3), ("Proliferate_DR", 4)):
+                names = [f"{folder[:2].lower()}{i}" for i in range(6)]
+                self._write_images(src / folder, [n + ".png" for n in names])
+                rows += [(n, grade) for n in names]
+            pd.DataFrame(rows, columns=["id_code", "diagnosis"]).to_csv(src / "train.csv", index=False, encoding="utf-8-sig")
+            df = self._load(src.parent, Path(t))
+            self.assertEqual(len(df), 30)
+            self.assertEqual(df["diagnosis"].value_counts().to_dict(), {g: 6 for g in range(5)})
+
+    def test_unlabelled_test_set_gives_clear_error(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "src"
+            ids = [f"t{i}" for i in range(6)]
+            self._write_images(src / "test_images", [f"{i}.png" for i in ids])
+            pd.DataFrame({"id_code": ids}).to_csv(src / "test.csv", index=False)
+            with self.assertRaises(RuntimeError) as ctx:
+                self._load(src, Path(t))
+            self.assertIn("NO diagnosis labels", str(ctx.exception))
+
+    def test_grade_names(self):
+        self.assertEqual([D.grade_from_name(n) for n in ["0", "No_DR", "Mild", "moderate", "Severe", "Proliferate_DR", "Grade 3"]],
+                         [0, 0, 1, 2, 3, 4, 3])
+        self.assertIsNone(D.grade_from_name("train"))
 
 
 @unittest.skipUnless(HAS_TF, "TensorFlow not installed")
