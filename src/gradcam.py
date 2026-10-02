@@ -20,9 +20,7 @@ import keras
 from . import config as C
 
 
-def get_base_model(model: keras.Model) -> keras.Model:
-    """Return the pretrained backbone sub-model (works after load_model)."""
-    return model.get_layer(C.BACKBONE_LAYER_NAME)
+from .model import get_base_model  # noqa: E402,F401  (re-exported: the backbone is the nested Model inside the DR model)
 
 
 def make_gradcam(model: keras.Model, img_uint8: np.ndarray, class_idx: Optional[int] = None

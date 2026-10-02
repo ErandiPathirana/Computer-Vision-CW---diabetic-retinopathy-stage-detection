@@ -43,11 +43,13 @@ def build_model(backbone_name: str = "efficientnetb0", dropout: float = C.DROPOU
                 num_classes: int = C.NUM_CLASSES) -> keras.Model:
     """Backbone (named 'backbone') + classification head.
 
-    Layer names are fixed ('preprocess', 'backbone', 'gap', 'head_bn', 'dropout',
-    'predictions') because Grad-CAM and the web app look layers up by name.
+    The head layer names are fixed ('preprocess', 'gap', 'head_bn', 'dropout', 'predictions')
+    because Grad-CAM looks them up by name; the pretrained backbone keeps its Keras default name.
     """
-    base = BACKBONES[backbone_name](include_top=False, weights=weights, input_shape=(C.IMG_SIZE, C.IMG_SIZE, 3),
-                                    name=C.BACKBONE_LAYER_NAME)
+    # IMPORTANT: do not pass name=... here. Keras builds the pretrained-weights file name from the model
+    # name ("efficientnetb0_notop.h5"), so a custom name makes the download fail with HTTP 403.
+    # The backbone is found later by type (see get_base_model), not by name.
+    base = BACKBONES[backbone_name](include_top=False, weights=weights, input_shape=(C.IMG_SIZE, C.IMG_SIZE, 3))
     base.trainable = False
     inputs = keras.Input(shape=(C.IMG_SIZE, C.IMG_SIZE, 3), name="image")
     x = _preprocess_layer(backbone_name)(inputs)
@@ -60,8 +62,11 @@ def build_model(backbone_name: str = "efficientnetb0", dropout: float = C.DROPOU
 
 
 def get_base_model(model: keras.Model) -> keras.Model:
-    """Return the pretrained sub-model (works after load_model too)."""
-    return model.get_layer(C.BACKBONE_LAYER_NAME)
+    """Return the pretrained backbone: the one nested Model inside the DR model (works after load_model too)."""
+    for layer in model.layers:
+        if isinstance(layer, keras.Model):
+            return layer
+    raise ValueError("No nested backbone model found in this model.")
 
 
 def compile_model(model: keras.Model, lr: float) -> None:

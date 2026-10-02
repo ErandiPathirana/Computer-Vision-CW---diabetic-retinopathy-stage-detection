@@ -121,6 +121,15 @@ class TestData(unittest.TestCase):
             D.validate_dataset(pd.DataFrame({"id_code": ["a"], "diagnosis": [9]}))
 
 
+class TestModelSource(unittest.TestCase):
+    """Regression test that needs no TensorFlow: a custom name on the pretrained backbone breaks the weight download."""
+
+    def test_backbone_is_not_given_a_custom_name(self):
+        src = (Path(__file__).resolve().parent.parent / "src" / "model.py").read_text()
+        call = src.split("BACKBONES[backbone_name](", 1)[1].split(")\n", 1)[0]
+        self.assertNotIn("name=", call)
+
+
 class TestDriveLoader(unittest.TestCase):
     """The loader must cope with the different layouts Kaggle DR datasets come in."""
 

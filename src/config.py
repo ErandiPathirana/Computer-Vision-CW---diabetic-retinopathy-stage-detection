@@ -78,7 +78,7 @@ BLACK_THRESHOLD = 7
 # Web app
 LOW_CONFIDENCE_THRESHOLD = 0.6
 
-BACKBONE_LAYER_NAME = "backbone"   # name of the pretrained sub-model (used by Grad-CAM)
+BACKBONE_LAYER_NAME = "backbone"   # no longer used to name the backbone (a custom name breaks Keras weight downloads)
 
 
 def ensure_dirs() -> None:
