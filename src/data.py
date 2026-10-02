@@ -75,24 +75,35 @@ def _find_image_folder(root: Path) -> Path:
 
 
 def _find_label_csv(search_dirs: List[Path]) -> Path:
-    """Find a CSV that has both 'id_code' and 'diagnosis' columns."""
-    checked = []
+    """Find the labelled CSV (columns 'id_code' and 'diagnosis').
+
+    Kaggle's sample_submission.csv also has these two columns, but every label in it is 0,
+    so a CSV whose labels are all identical is rejected. Files called train.csv are preferred.
+    """
+    candidates, notes = [], []
     for base in search_dirs:
         for dirpath, _, files in os.walk(base):
             for f in files:
-                if f.lower().endswith(".csv"):
-                    p = Path(dirpath) / f
-                    try:
-                        cols = list(pd.read_csv(p, nrows=2).columns)
-                    except Exception:
-                        continue
-                    checked.append(f"{p.name}: {cols}")
-                    if "id_code" in cols and "diagnosis" in cols:
-                        return p
+                if not f.lower().endswith(".csv"):
+                    continue
+                p = Path(dirpath) / f
+                try:
+                    d = pd.read_csv(p)
+                except Exception:
+                    continue
+                if not {"id_code", "diagnosis"}.issubset(d.columns):
+                    notes.append(f"{f}: columns {list(d.columns)} (no labels)")
+                elif d["diagnosis"].nunique() < 2:
+                    notes.append(f"{f}: {len(d)} rows but only one distinct label "
+                                 f"({d['diagnosis'].unique().tolist()}), looks like sample_submission.csv")
+                else:
+                    candidates.append((p.name.lower() != "train.csv", -len(d), p))
+    if candidates:
+        return sorted(candidates)[0][2]
     raise RuntimeError(
-        "No labelled CSV found (needs columns 'id_code' and 'diagnosis'). "
-        "A CSV without 'diagnosis' (e.g. the unlabelled Kaggle test.csv) cannot be used for "
-        "training. CSV files seen: " + (", ".join(checked) or "none")
+        "No labelled CSV found. You need the Kaggle APTOS file 'train.csv' (columns id_code and diagnosis with grades 0-4) "
+        "together with the matching 'train_images'. The unlabelled test.csv and sample_submission.csv cannot be used for "
+        "training. CSV files seen: " + ("; ".join(notes) or "none")
     )
 
 
@@ -154,6 +165,10 @@ def validate_dataset(df: pd.DataFrame, img_dir: Path = C.IMG_DIR, check_readable
     if bad_labels.any():
         raise ValueError(f"{int(bad_labels.sum())} rows have labels outside 0-{C.NUM_CLASSES - 1}.")
     df["diagnosis"] = df["diagnosis"].astype(int)
+    if df["diagnosis"].nunique() < 2:
+        raise ValueError(
+            f"Only one class is present (all labels = {df['diagnosis'].iloc[0]}). This is usually sample_submission.csv "
+            "or an unlabelled file. Use the labelled train.csv from the Kaggle APTOS Data tab.")
 
     dup = int(df["id_code"].duplicated().sum())
     df = df.drop_duplicates("id_code").reset_index(drop=True)
@@ -175,8 +190,15 @@ def validate_dataset(df: pd.DataFrame, img_dir: Path = C.IMG_DIR, check_readable
         unreadable = keep.count(False)
         df = df[keep].reset_index(drop=True)
 
+    if df["diagnosis"].nunique() < 2:
+        raise ValueError(
+            f"Only one class is present (all labels = {df['diagnosis'].iloc[0]}). This is usually sample_submission.csv "
+            "or an unlabelled file. Use the labelled train.csv from the Kaggle APTOS Data tab.")
     print(f"Validation: {len(df)} usable images | duplicates removed: {dup} | "
           f"CSV rows without an image: {missing} | unreadable images: {unreadable}")
+    print("Images per grade:", df["diagnosis"].value_counts().sort_index().to_dict())
+    if len(df) < 500:
+        print("WARNING: fewer than 500 labelled images. The full APTOS training set has 3662.")
     if len(df) == 0:
         raise RuntimeError("No labelled images matched the CSV. Do the zip and CSV come from the same set?")
     return df
@@ -323,6 +345,7 @@ def make_splits(df: pd.DataFrame, out_dir: Path = C.SPLIT_DIR, seed: int = C.SEE
 
     table = pd.DataFrame({n: d["diagnosis"].value_counts().sort_index()
                           for n, d in zip(("train", "val", "test"), (train_df, val_df, test_df))}).fillna(0).astype(int)
+    table = table.reindex(range(C.NUM_CLASSES), fill_value=0)     # always one row per grade
     table.index = C.CLASS_NAMES
     table.loc["Total"] = table.sum()
     table.to_csv(out_dir / "split_counts.csv")

@@ -101,6 +101,17 @@ class TestData(unittest.TestCase):
             self.assertFalse(set(tr.id_code) & set(va.id_code))
             self.assertEqual(set(tr.diagnosis), set(range(5)))    # stratified: every class in train
 
+    def test_one_class_csv_is_rejected_and_train_csv_preferred(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            pd.DataFrame({"id_code": list("abc"), "diagnosis": [0, 0, 0]}).to_csv(root / "sample_submission.csv", index=False)
+            with self.assertRaises(RuntimeError):
+                D._find_label_csv([root])
+            pd.DataFrame({"id_code": list("abc"), "diagnosis": [0, 1, 2]}).to_csv(root / "train.csv", index=False)
+            self.assertEqual(D._find_label_csv([root]).name, "train.csv")
+        with self.assertRaises(ValueError):
+            D.validate_dataset(pd.DataFrame({"id_code": ["a", "b"], "diagnosis": [0, 0]}), check_readable=False)
+
     def test_csv_without_labels_gives_clear_error(self):
         with self.assertRaises(ValueError):
             D.validate_dataset(pd.DataFrame({"id_code": ["a", "b"]}))
