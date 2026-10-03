@@ -7,6 +7,7 @@ Run after training + evaluation (the notebook does this for you).
 from __future__ import annotations
 
 import json
+from typing import Optional
 import shutil
 from pathlib import Path
 
@@ -44,39 +45,31 @@ def _csv_to_json(src: Path, dst: Path) -> None:
     dst.write_text(json.dumps(pd.read_csv(src).to_dict(orient="records"), indent=2))
 
 
-def export_samples(test_df: pd.DataFrame, per_class: int = 1) -> None:
-    """Copy a few TEST images (one per grade) into webapp/samples/ for the demo buttons.
+def export_samples(test_df: Optional[pd.DataFrame] = None, per_class: int = 1) -> None:
+    """Copy a few TEST images (one per grade) into webapp/samples/ for the app's "Try a sample" buttons.
 
-    These are dataset images, so webapp/samples/ is git-ignored (the Kaggle terms do not
-    allow redistribution). They are only used locally for the demo video.
+    Pass the test dataframe, or nothing (then results/splits/test.csv is used). A plain number is accepted
+    as per_class for backwards compatibility. These are dataset images, so webapp/samples/ is git-ignored
+    (the Kaggle terms do not allow redistribution); keep them on your own computer for the demo only.
     """
-    samples = C.REPO_ROOT / "webapp" / "samples"
-    samples.mkdir(parents=True, exist_ok=True)
-    for cls in range(C.NUM_CLASSES):
-        rows = test_df[test_df["diagnosis"] == cls].head(per_class)
-        for i, row in enumerate(rows.itertuples()):
-            src = Path(row.path)
-            shutil.copy(src, samples / f"grade{cls}_{C.CLASS_NAMES[cls].split()[0].lower()}_{i + 1}{src.suffix.lower()}")
-    print("Sample images copied to", samples)
-
-
-def export_samples(per_class: int = 1) -> None:
-    """Copy a few test-split images (one per grade) into webapp/samples/ for the app's "Try a sample" buttons.
-
-    These are competition images, so the folder is git-ignored: keep them on your own computer only.
-    """
-    test_csv = C.SPLIT_DIR / "test.csv"
-    if not test_csv.exists():
-        print("No test split found; skipping demo samples.")
-        return
+    if isinstance(test_df, int):                      # old call style: export_samples(2)
+        per_class, test_df = test_df, None
+    if test_df is None:
+        test_csv = C.SPLIT_DIR / "test.csv"
+        if not test_csv.exists():
+            print("No test split found; skipping demo samples.")
+            return
+        test_df = pd.read_csv(test_csv)
     samples_dir = C.REPO_ROOT / "webapp" / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
-    df = pd.read_csv(test_csv)
+    copied = 0
     for cls in range(C.NUM_CLASSES):
-        for _, row in df[df["diagnosis"] == cls].head(per_class).iterrows():
+        for _, row in test_df[test_df["diagnosis"] == cls].head(per_class).iterrows():
             src = Path(row["path"])
             if src.exists():
                 shutil.copy(src, samples_dir / f"grade{cls}_{src.stem}{src.suffix.lower()}")
+                copied += 1
+    print(f"Sample images copied: {copied} -> {samples_dir}")
 
 
 def export_all() -> None:

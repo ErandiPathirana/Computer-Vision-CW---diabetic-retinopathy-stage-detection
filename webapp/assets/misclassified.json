@@ -1,0 +1,74 @@
+[
+  {
+    "id_code": "2665f72e2dd3",
+    "true": "Severe",
+    "predicted": "Proliferative DR",
+    "confidence": 0.999
+  },
+  {
+    "id_code": "405b4f78658f",
+    "true": "Severe",
+    "predicted": "Proliferative DR",
+    "confidence": 0.994
+  },
+  {
+    "id_code": "cb02bb47fdc5",
+    "true": "No DR",
+    "predicted": "Mild",
+    "confidence": 0.993
+  },
+  {
+    "id_code": "e26d8718ca58",
+    "true": "Mild",
+    "predicted": "No DR",
+    "confidence": 0.988
+  },
+  {
+    "id_code": "3fc219927a97",
+    "true": "Moderate",
+    "predicted": "Mild",
+    "confidence": 0.96
+  },
+  {
+    "id_code": "af3b0115aad1",
+    "true": "Severe",
+    "predicted": "Proliferative DR",
+    "confidence": 0.957
+  },
+  {
+    "id_code": "6f4719c6bb4b",
+    "true": "Proliferative DR",
+    "predicted": "Severe",
+    "confidence": 0.954
+  },
+  {
+    "id_code": "e1fb532f55df",
+    "true": "Severe",
+    "predicted": "Proliferative DR",
+    "confidence": 0.951
+  },
+  {
+    "id_code": "d18aea8238a0",
+    "true": "Moderate",
+    "predicted": "Mild",
+    "confidence": 0.951
+  },
+  {
+    "id_code": "b019a49787c1",
+    "true": "Severe",
+    "predicted": "Proliferative DR",
+    "confidence": 0.946
+  },
+  {
+    "id_code": "38e0e28d35d3",
+    "true": "Mild",
+    "predicted": "No DR",
+    "confidence": 0.913
+  },
+  {
+    "id_code": "810d3779abd9",
+    "true": "Severe",
+    "predicted": "Proliferative DR",
+    "confidence": 0.909
+  }
+]

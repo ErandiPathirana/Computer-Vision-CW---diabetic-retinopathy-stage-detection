@@ -1,0 +1,41 @@
+{
+  "n_images": 3662,
+  "class_counts": {
+    "No DR": 1805,
+    "Mild": 370,
+    "Moderate": 999,
+    "Severe": 193,
+    "Proliferative DR": 295
+  },
+  "class_percent": {
+    "No DR": 49.29,
+    "Mild": 10.1,
+    "Moderate": 27.28,
+    "Severe": 5.27,
+    "Proliferative DR": 8.06
+  },
+  "imbalance_ratio": 9.35,
+  "n_distinct_image_sizes": 1,
+  "width_min_max": [
+    224,
+    224
+  ],
+  "height_min_max": [
+    224,
+    224
+  ],
+  "mean_brightness_by_class": {
+    "0": 67.8,
+    "1": 68.3,
+    "2": 68.5,
+    "3": 67.2,
+    "4": 69.2
+  },
+  "mean_sharpness_by_class": {
+    "0": 1217.9,
+    "1": 975.7,
+    "2": 1022.0,
+    "3": 1061.6,
+    "4": 1067.4
+  }
+}

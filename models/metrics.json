@@ -1,0 +1,116 @@
+{
+  "accuracy": 0.7927272727272727,
+  "macro_precision": 0.6210917469627147,
+  "macro_recall": 0.6266837502320388,
+  "macro_f1": 0.6234820352061731,
+  "quadratic_weighted_kappa": 0.8640187273487183,
+  "per_class": {
+    "No DR": {
+      "precision": 0.9672727272727273,
+      "recall": 0.981549815498155,
+      "f1": 0.9743589743589743,
+      "support": 271
+    },
+    "Mild": {
+      "precision": 0.5,
+      "recall": 0.5357142857142857,
+      "f1": 0.5172413793103449,
+      "support": 56
+    },
+    "Moderate": {
+      "precision": 0.7642857142857142,
+      "recall": 0.7133333333333334,
+      "f1": 0.7379310344827587,
+      "support": 150
+    },
+    "Severe": {
+      "precision": 0.41935483870967744,
+      "recall": 0.4482758620689655,
+      "f1": 0.43333333333333335,
+      "support": 29
+    },
+    "Proliferative DR": {
+      "precision": 0.45454545454545453,
+      "recall": 0.45454545454545453,
+      "f1": 0.45454545454545453,
+      "support": 44
+    }
+  },
+  "roc_auc_per_class": {
+    "No DR": 0.9937705828671191,
+    "Mild": 0.9122686524002313,
+    "Moderate": 0.9261166666666667,
+    "Severe": 0.841948507512079,
+    "Proliferative DR": 0.8910797700323392
+  },
+  "macro_roc_auc": 0.9130368358956871,
+  "confusion_matrix": [
+    [
+      266,
+      5,
+      0,
+      0,
+      0
+    ],
+    [
+      7,
+      30,
+      14,
+      1,
+      4
+    ],
+    [
+      2,
+      21,
+      107,
+      9,
+      11
+    ],
+    [
+      0,
+      2,
+      5,
+      13,
+      9
+    ],
+    [
+      0,
+      2,
+      14,
+      8,
+      20
+    ]
+  ],
+  "n_test": 550,
+  "error_analysis": {
+    "most_confused": [
+      {
+        "true": "Moderate",
+        "predicted": "Mild",
+        "count": 21
+      },
+      {
+        "true": "Proliferative DR",
+        "predicted": "Moderate",
+        "count": 14
+      },
+      {
+        "true": "Mild",
+        "predicted": "Moderate",
+        "count": 14
+      },
+      {
+        "true": "Moderate",
+        "predicted": "Proliferative DR",
+        "count": 11
+      },
+      {
+        "true": "Severe",
+        "predicted": "Proliferative DR",
+        "count": 9
+      }
+    ],
+    "off_by_one_share": 0.6842105263157895,
+    "severe_missed_as_none_or_mild": 4
+  }
+}

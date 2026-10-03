@@ -1,0 +1,7 @@
+,train,val,test
+No DR,1263,271,271
+Mild,259,55,56
+Moderate,699,150,150
+Severe,135,29,29
+Proliferative DR,207,44,44
+Total,2563,549,550
